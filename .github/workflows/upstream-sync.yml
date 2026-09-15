@@ -1,0 +1,36 @@
+name: Upstream Sync Watcher
+
+on:
+  schedule:
+    # 每天北京时间中午 12:00 自动检查上游更新
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check upstream HKUDS/nanobot updates
+        run: |
+          cargo run -- sync check
+
+      - name: Pull latest Prompt templates and assets
+        run: |
+          cargo run -- sync pull-assets
+
+      - name: Create Pull Request if assets updated
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: sync prompt templates from upstream HKUDS/nanobot"
+          title: "🤖 [Upstream Sync] 同步上游 HKUDS/nanobot 最新模板与资产"
+          body: |
+            自动从上游 `HKUDS/nanobot` 同步了最新 Prompt 模板与文档。
+            请检查并合并。
+          branch: "sync/upstream-templates"
+          delete-branch: true

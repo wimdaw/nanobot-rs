@@ -1,0 +1,14 @@
+{
+  "upstream_repo": "HKUDS/nanobot",
+  "tracked_branch": "main",
+  "last_synced_commit": "",
+  "last_check_time": "2026-09-15T03:42:33.296928+00:00",
+  "synced_files": [
+    "templates/SOUL.md",
+    "templates/AGENTS.md",
+    "templates/USER.md",
+    "templates/HEARTBEAT.md",
+    "templates/agent/identity.md",
+    "templates/agent/tool_contract.md"
+  ]
+}
