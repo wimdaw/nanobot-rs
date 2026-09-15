@@ -63,8 +63,9 @@ impl Tool for WebFetchTool {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let summary = if stripped.len() > 4000 {
-            format!("{}...\n（内容过长，已截断展示前 4000 字符）", &stripped[..4000])
+        let char_count = stripped.chars().count();
+        let summary = if char_count > 3000 {
+            format!("{}...\n（内容过长，已截断展示前 3000 字符）", stripped.chars().take(3000).collect::<String>())
         } else {
             stripped
         };

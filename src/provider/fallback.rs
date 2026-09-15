@@ -1,8 +1,10 @@
-use super::{ChatRequest, ChatResponse, LlmProvider};
+use super::{ChatRequest, ChatResponse, LlmProvider, ProviderStreamEvent};
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::Stream;
+use std::pin::Pin;
 use std::sync::Arc;
-use tracing::{warn, info};
+use tracing::{info, warn};
 
 pub struct FallbackProvider {
     primary: Arc<dyn LlmProvider>,
@@ -42,6 +44,36 @@ impl LlmProvider for FallbackProvider {
                         }
                         Err(fb_err) => {
                             warn!("备用模型 {} 调用失败: {}", fb_model, fb_err);
+                        }
+                    }
+                }
+
+                Err(err)
+            }
+        }
+    }
+
+    async fn stream(
+        &self,
+        req: &ChatRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderStreamEvent>> + Send>>> {
+        match self.primary.stream(req).await {
+            Ok(s) => Ok(s),
+            Err(err) => {
+                warn!(
+                    "主模型 {} 流式连接失败: {}, 切换至降级链...",
+                    req.model, err
+                );
+
+                for (fb_provider, fb_model) in &self.fallbacks {
+                    info!("正在切换至备用模型流式端点: {} (提供商: {})", fb_model, fb_provider.name());
+                    let mut fb_req = req.clone();
+                    fb_req.model = fb_model.clone();
+
+                    match fb_provider.stream(&fb_req).await {
+                        Ok(s) => return Ok(s),
+                        Err(fb_err) => {
+                            warn!("备用模型 {} 流式连接失败: {}", fb_model, fb_err);
                         }
                     }
                 }

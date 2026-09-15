@@ -2,9 +2,12 @@ use super::context::ContextBuilder;
 use super::runner::AgentRunner;
 use crate::bus::{InboundMessage, MessageBus, OutboundMessage};
 use crate::config::AppConfig;
+use crate::memory::MemoryStore;
 use crate::provider::LlmProvider;
+use crate::session::compactor::SessionCompactor;
 use crate::session::manager::SessionManager;
 use crate::session::SessionMessage;
+use crate::skills::SkillsManager;
 use crate::tools::registry::ToolRegistry;
 use chrono::Utc;
 use std::sync::Arc;
@@ -15,6 +18,8 @@ pub struct AgentLoop {
     sessions: SessionManager,
     runner: Arc<AgentRunner>,
     workspace: String,
+    memory: Arc<MemoryStore>,
+    skills: Arc<SkillsManager>,
 }
 
 impl AgentLoop {
@@ -23,6 +28,8 @@ impl AgentLoop {
         config: &AppConfig,
         provider: Arc<dyn LlmProvider>,
         tools: ToolRegistry,
+        memory: Arc<MemoryStore>,
+        skills: Arc<SkillsManager>,
     ) -> anyhow::Result<Self> {
         let sessions = SessionManager::new(&config.session.storage_dir)?;
         let runner = Arc::new(AgentRunner::new(
@@ -39,6 +46,8 @@ impl AgentLoop {
             sessions,
             runner,
             workspace: config.tools.workspace.clone(),
+            memory,
+            skills,
         })
     }
 
@@ -50,9 +59,11 @@ impl AgentLoop {
             let sessions = self.sessions.clone();
             let runner = self.runner.clone();
             let workspace = self.workspace.clone();
+            let memory = self.memory.clone();
+            let skills = self.skills.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_message(bus, sessions, runner, workspace, msg).await {
+                if let Err(e) = Self::handle_message(bus, sessions, runner, workspace, memory, skills, msg).await {
                     error!("处理消息异常: {}", e);
                 }
             });
@@ -64,6 +75,8 @@ impl AgentLoop {
         sessions: SessionManager,
         runner: Arc<AgentRunner>,
         workspace: String,
+        memory: Arc<MemoryStore>,
+        skills: Arc<SkillsManager>,
         msg: InboundMessage,
     ) -> anyhow::Result<()> {
         let session_key = &msg.session_key;
@@ -74,9 +87,11 @@ impl AgentLoop {
 
         let mut session = sessions.load_session(session_key)?;
 
-        // 若为新会话，注入系统提示词
+        // 若为新会话，注入系统提示词与记忆
         if session.messages.is_empty() {
-            let sys_prompt = ContextBuilder::build_system_prompt(&workspace);
+            let memories = memory.load();
+            let skills_sec = skills.render_system_prompt_section();
+            let sys_prompt = ContextBuilder::build_system_prompt(&workspace, &memories, &skills_sec);
             session.messages.push(SessionMessage {
                 role: "system".to_string(),
                 content: Some(sys_prompt),
@@ -87,10 +102,14 @@ impl AgentLoop {
             });
         }
 
+        // 智能防滚雪球：检查是否需要上下文压缩（超过 20 条自动提炼老消息，保留最新 8 条）
+        SessionCompactor::maybe_compact(&mut session, 20, 8);
+
         // 执行多轮 Agent 状态机
         let reply_text = runner.run_turn(&mut session, &msg.content).await?;
 
         // 持久化当前会话状态
+        sessions.reset_session(session_key)?;
         for m in &session.messages {
             sessions.append_message(session_key, m)?;
         }

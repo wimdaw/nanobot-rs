@@ -1,9 +1,11 @@
 use crate::bus::{MessageBus, StreamEvent};
-use crate::provider::{ChatRequest, LlmProvider};
-use crate::session::{Session, SessionMessage};
+use crate::provider::{ChatRequest, LlmProvider, ProviderStreamEvent};
+use crate::session::{FunctionCall, Session, SessionMessage, ToolCall};
 use crate::tools::registry::ToolRegistry;
 use anyhow::Result;
 use chrono::Utc;
+use futures::StreamExt;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -60,35 +62,101 @@ impl AgentRunner {
                 tools: if openai_tools.is_empty() { None } else { Some(openai_tools.clone()) },
                 temperature: Some(0.7),
                 max_tokens: Some(4096),
-                stream: false,
+                stream: true,
             };
 
-            let resp = self.provider.chat(&req).await?;
+            // 优先尝试真实流式处理，降级为非流式
+            let (content, _reasoning, tool_calls, total_tokens) = match self.provider.stream(&req).await {
+                Ok(mut stream) => {
+                    let mut text_acc = String::new();
+                    let mut reasoning_acc = String::new();
+                    let mut tools_map: HashMap<usize, (Option<String>, Option<String>, String)> = HashMap::new();
+                    let mut tokens = None;
 
-            // 发送思考与文本流式事件
-            if let Some(ref r) = resp.reasoning_content {
-                self.bus.publish_event(StreamEvent::ReasoningDelta(r.clone()));
-            }
-            if let Some(ref c) = resp.content {
-                self.bus.publish_event(StreamEvent::TextDelta(c.clone()));
+                    while let Some(evt_res) = stream.next().await {
+                        if let Ok(evt) = evt_res {
+                            match evt {
+                                ProviderStreamEvent::ReasoningDelta(r) => {
+                                    self.bus.publish_event(StreamEvent::ReasoningDelta(r.clone()));
+                                    reasoning_acc.push_str(&r);
+                                }
+                                ProviderStreamEvent::ContentDelta(c) => {
+                                    self.bus.publish_event(StreamEvent::TextDelta(c.clone()));
+                                    text_acc.push_str(&c);
+                                }
+                                ProviderStreamEvent::ToolCallDelta { index, id, name, arguments } => {
+                                    let entry = tools_map.entry(index).or_insert((None, None, String::new()));
+                                    if id.is_some() { entry.0 = id; }
+                                    if name.is_some() { entry.1 = name; }
+                                    entry.2.push_str(&arguments);
+                                }
+                                ProviderStreamEvent::Completed { total_tokens: tt, .. } => {
+                                    tokens = tt;
+                                }
+                            }
+                        }
+                    }
+
+                    let parsed_calls = if !tools_map.is_empty() {
+                        let mut sorted_indices: Vec<_> = tools_map.keys().copied().collect();
+                        sorted_indices.sort();
+                        let calls: Vec<ToolCall> = sorted_indices
+                            .into_iter()
+                            .filter_map(|idx| {
+                                let (id, name, args) = tools_map.remove(&idx)?;
+                                Some(ToolCall {
+                                    id: id.unwrap_or_else(|| format!("call_{}", idx)),
+                                    call_type: "function".to_string(),
+                                    function: FunctionCall {
+                                        name: name.unwrap_or_default(),
+                                        arguments: args,
+                                    },
+                                })
+                            })
+                            .collect();
+                        if calls.is_empty() { None } else { Some(calls) }
+                    } else {
+                        None
+                    };
+
+                    (
+                        if text_acc.is_empty() { None } else { Some(text_acc) },
+                        if reasoning_acc.is_empty() { None } else { Some(reasoning_acc) },
+                        parsed_calls,
+                        tokens,
+                    )
+                }
+                Err(stream_err) => {
+                    warn!("流式请求失败 ({})，回退到非流式重试...", stream_err);
+                    let mut non_stream_req = req.clone();
+                    non_stream_req.stream = false;
+                    let resp = self.provider.chat(&non_stream_req).await?;
+                    if let Some(ref c) = resp.content {
+                        self.bus.publish_event(StreamEvent::TextDelta(c.clone()));
+                    }
+                    (resp.content, resp.reasoning_content, resp.tool_calls, resp.total_tokens)
+                }
+            };
+
+            if let Some(ref c) = content {
                 final_content = c.clone();
             }
 
             // 检查是否有工具调用
-            if let Some(ref tool_calls) = resp.tool_calls {
-                if !tool_calls.is_empty() {
+            if let Some(ref calls) = tool_calls {
+                if !calls.is_empty() {
                     // 记录助手输出包含工具调用的消息
                     session.messages.push(SessionMessage {
                         role: "assistant".to_string(),
-                        content: resp.content.clone(),
+                        content: content.clone(),
                         name: None,
-                        tool_calls: Some(tool_calls.clone()),
+                        tool_calls: Some(calls.clone()),
                         tool_call_id: None,
                         timestamp: Utc::now(),
                     });
 
                     // 依次执行每个工具调用
-                    for call in tool_calls {
+                    for call in calls {
                         info!("调用工具 [{}]: {}", call.function.name, call.function.arguments);
                         self.bus.publish_event(StreamEvent::ToolCallStarted {
                             call_id: call.id.clone(),
@@ -124,7 +192,7 @@ impl AgentRunner {
             // 无工具调用，单轮对话完成
             session.messages.push(SessionMessage {
                 role: "assistant".to_string(),
-                content: resp.content.clone(),
+                content: content.clone(),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
@@ -132,7 +200,7 @@ impl AgentRunner {
             });
 
             self.bus.publish_event(StreamEvent::TurnCompleted {
-                total_tokens: resp.total_tokens,
+                total_tokens,
             });
             break;
         }

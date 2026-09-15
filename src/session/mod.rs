@@ -1,3 +1,4 @@
+pub mod compactor;
 pub mod manager;
 pub mod store;
 

@@ -3,9 +3,14 @@ use nanobot_rs::agent::AgentLoop;
 use nanobot_rs::bus::MessageBus;
 use nanobot_rs::channels::{CliChannel, FeishuChannel};
 use nanobot_rs::config::loader::load_config;
+use nanobot_rs::gateway::start_http_gateway;
+use nanobot_rs::memory::tools::{MemorySaveTool, MemorySearchTool};
+use nanobot_rs::memory::MemoryStore;
 use nanobot_rs::provider::fallback::FallbackProvider;
 use nanobot_rs::provider::openai::OpenAiProvider;
 use nanobot_rs::provider::LlmProvider;
+use nanobot_rs::skills::tool::LoadSkillTool;
+use nanobot_rs::skills::SkillsManager;
 use nanobot_rs::sync::{AssetSyncer, DiffReporter};
 use nanobot_rs::tools::builtin::register_all_builtin;
 use nanobot_rs::tools::registry::ToolRegistry;
@@ -32,8 +37,11 @@ enum Commands {
     },
     #[command(about = "启动交互式终端 REPL 会话")]
     Chat,
-    #[command(about = "启动常驻网关服务（支持飞书等通道）")]
-    Gateway,
+    #[command(about = "启动常驻网关服务（包含飞书与 OpenAI 兼容 HTTP 服务）")]
+    Gateway {
+        #[arg(short, long, default_value = "18790", help = "HTTP 网关监听端口")]
+        port: u16,
+    },
     #[command(about = "上游 (HKUDS/nanobot) 版本同步与检查")]
     Sync {
         #[command(subcommand)]
@@ -61,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Version => {
-            println!("nanobot-rs v0.1.0 (built with Rust, powered by tokio)");
+            println!("nanobot-rs v0.1.0 (built with Rust, powered by tokio & axum)");
             println!("Target: {} {}", std::env::consts::OS, std::env::consts::ARCH);
             return Ok(());
         }
@@ -87,13 +95,13 @@ async fn main() -> anyhow::Result<()> {
         _ => {}
     }
 
-    // 加载配置
+    // 1. 加载配置
     let config = load_config(cli.config.as_deref())?;
 
-    // 初始化核心消息总线
+    // 2. 初始化核心消息总线
     let bus = MessageBus::new(256);
 
-    // 构建 Provider 与降级链
+    // 3. 构建 Provider 与故障转移降级链
     let primary_provider: Arc<dyn LlmProvider> = Arc::new(OpenAiProvider::new(
         &config.model.provider,
         &config.model.base_url,
@@ -107,14 +115,34 @@ async fn main() -> anyhow::Result<()> {
     }
     let provider: Arc<dyn LlmProvider> = Arc::new(FallbackProvider::new(primary_provider, fallbacks));
 
-    // 注册内置工具
+    // 4. 初始化长期记忆存储与技能管理器
+    let memory_store = Arc::new(MemoryStore::new(&config.session.storage_dir)?);
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let skills_dirs = vec![
+        PathBuf::from(&home).join(".nanobot-rs").join("skills"),
+        PathBuf::from(&config.session.storage_dir).join("skills"),
+        PathBuf::from(&config.tools.workspace).join("skills"),
+    ];
+    let skills_manager = Arc::new(SkillsManager::load_from_dirs(&skills_dirs));
+
+    // 5. 注册内置核心工具与记忆/技能专属工具
     let mut tool_registry = ToolRegistry::new();
     register_all_builtin(&mut tool_registry);
+    tool_registry.register(Arc::new(MemorySaveTool::new(memory_store.clone())));
+    tool_registry.register(Arc::new(MemorySearchTool::new(memory_store.clone())));
+    tool_registry.register(Arc::new(LoadSkillTool::new(skills_manager.clone())));
 
-    // 初始化 Agent 运行时主循环
-    let agent_loop = AgentLoop::new(bus.clone(), &config, provider, tool_registry)?;
+    // 6. 初始化 Agent 运行时主循环
+    let agent_loop = AgentLoop::new(
+        bus.clone(),
+        &config,
+        provider.clone(),
+        tool_registry.clone(),
+        memory_store.clone(),
+        skills_manager.clone(),
+    )?;
 
-    // 启动后台 Agent 调度循环
+    // 7. 启动后台 Agent 调度循环
     tokio::spawn(async move {
         agent_loop.run().await;
     });
@@ -128,15 +156,15 @@ async fn main() -> anyhow::Result<()> {
             let cli_channel = CliChannel::new(bus.clone());
             cli_channel.start_repl().await?;
         }
-        Commands::Gateway => {
-            println!("🚀 启动 nanobot-rs 常驻网关守护模式...");
+        Commands::Gateway { port } => {
+            println!("🚀 启动 nanobot-rs 网关守护模式 (HTTP 端口: {})...", port);
             if config.channels.feishu.enabled {
                 let feishu = FeishuChannel::new(config.channels.feishu.clone(), bus.clone());
                 feishu.start().await?;
             }
-            println!("✅ 网关已就绪。按 Ctrl+C 停止。");
-            tokio::signal::ctrl_c().await?;
-            println!("\n网关已安全退出。");
+
+            // 启动 OpenAI 兼容 HTTP 网关
+            start_http_gateway(port, config, provider, tool_registry, bus).await?;
         }
         _ => {}
     }
