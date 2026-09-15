@@ -6,25 +6,38 @@ use serde_json::Value;
 use std::sync::Arc;
 
 pub struct SessionListTool {
-    _manager: Arc<SessionManager>,
+    manager: Arc<SessionManager>,
 }
 
 impl SessionListTool {
     pub fn new(manager: Arc<SessionManager>) -> Self {
-        Self { _manager: manager }
+        Self { manager }
     }
 }
 
 #[async_trait]
 impl Tool for SessionListTool {
     fn name(&self) -> &str { "session_list" }
-    fn description(&self) -> &str { "查看或检索系统中已保存的历史对话会话" }
+    fn description(&self) -> &str { "查看或检索系统中已保存的历史会话列表及消息统计" }
     fn parameters_schema(&self) -> Value {
         serde_json::json!({ "type": "object", "properties": {} })
     }
     async fn execute(&self, _args: &Value, _workspace: &str) -> Result<ToolResult> {
-        // 返回常用当前会话信息
-        Ok(ToolResult::success("已就绪会话存储引擎 (JSONL-backed)。会话自动按 channel:id 隔离。"))
+        let sessions = self.manager.list_sessions()?;
+        if sessions.is_empty() {
+            return Ok(ToolResult::success("当前暂无已持久化的历史会话"));
+        }
+        let mut out = String::from("【已持久化会话清单】:\n");
+        for s in sessions {
+            out.push_str(&format!(
+                "- [{}] 消息轮数: {} 轮 | 最后活跃: {} | 文件大小: {} 字节\n",
+                s.session_key,
+                s.message_count,
+                s.updated_at.format("%Y-%m-%d %H:%M:%S"),
+                s.file_size_bytes
+            ));
+        }
+        Ok(ToolResult::success(out))
     }
 }
 

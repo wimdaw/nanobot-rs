@@ -75,9 +75,10 @@ impl FeishuChannel {
             bus: self.bus.clone(),
         };
 
-        // 监听总线出站消息并回复飞书
+        // 监听总线出站消息并回复飞书 (广播订阅，不与其他通道竞争抢消息)
         tokio::spawn(async move {
-            while let Some(out) = bus.recv_outbound().await {
+            let mut out_rx = bus.subscribe_outbound();
+            while let Ok(out) = out_rx.recv().await {
                 if out.channel == "feishu" {
                     let _ = self_feishu.send_message("open_id", &out.recipient_id, &out.content).await;
                 }

@@ -21,6 +21,7 @@ use tracing::info;
 pub struct GatewayState {
     runner: Arc<AgentRunner>,
     config: AppConfig,
+    bus: MessageBus,
 }
 
 pub async fn start_http_gateway(
@@ -36,10 +37,14 @@ pub async fn start_http_gateway(
         config.model.default.clone(),
         config.tools.workspace.clone(),
         config.agent.max_turns,
-        bus,
+        bus.clone(),
     ));
 
-    let state = GatewayState { runner, config };
+    let state = GatewayState {
+        runner,
+        config,
+        bus,
+    };
 
     let app = Router::new()
         .route("/", get(dashboard_handler))
@@ -100,31 +105,69 @@ async fn chat_completions_handler(
     let mut temp_session = Session::new("http:temp");
 
     if stream {
-        // SSE 流式模式
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(32);
+        // 真实 SSE 增量流式模式：监听事件总线，逐 Token / 思考过程实时推送
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
         let runner = state.runner.clone();
+        let mut event_rx = state.bus.subscribe_events();
         let prompt = last_user_msg.to_string();
+        let chunk_id = format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis());
 
+        // 后台启动 Runner 执行任务
         tokio::spawn(async move {
-            let chunk_id = format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis());
-            match runner.run_turn(&mut temp_session, &prompt).await {
-                Ok(content) => {
-                    let sse_data = json!({
-                        "id": chunk_id,
-                        "object": "chat.completion.chunk",
-                        "created": chrono::Utc::now().timestamp(),
-                        "choices": [{
-                            "index": 0,
-                            "delta": { "content": content },
-                            "finish_reason": "stop"
-                        }]
-                    });
-                    let _ = tx.send(Ok(Event::default().data(sse_data.to_string()))).await;
-                    let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
-                }
-                Err(e) => {
-                    let sse_err = json!({ "error": e.to_string() });
-                    let _ = tx.send(Ok(Event::default().data(sse_err.to_string()))).await;
+            let _ = runner.run_turn(&mut temp_session, &prompt).await;
+        });
+
+        // 监听事件并实时推送 SSE
+        tokio::spawn(async move {
+            while let Ok(evt) = event_rx.recv().await {
+                match evt {
+                    crate::bus::StreamEvent::TextDelta(delta) => {
+                        let sse_data = json!({
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": chrono::Utc::now().timestamp(),
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "content": delta },
+                                "finish_reason": null
+                            }]
+                        });
+                        let _ = tx.send(Ok(Event::default().data(sse_data.to_string()))).await;
+                    }
+                    crate::bus::StreamEvent::ReasoningDelta(reasoning) => {
+                        let sse_data = json!({
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": chrono::Utc::now().timestamp(),
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "reasoning_content": reasoning },
+                                "finish_reason": null
+                            }]
+                        });
+                        let _ = tx.send(Ok(Event::default().data(sse_data.to_string()))).await;
+                    }
+                    crate::bus::StreamEvent::TurnCompleted { .. } => {
+                        let end_data = json!({
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": chrono::Utc::now().timestamp(),
+                            "choices": [{
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": "stop"
+                            }]
+                        });
+                        let _ = tx.send(Ok(Event::default().data(end_data.to_string()))).await;
+                        let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+                        break;
+                    }
+                    crate::bus::StreamEvent::TurnFailed(err) => {
+                        let err_data = json!({ "error": { "message": err, "type": "turn_failed" } });
+                        let _ = tx.send(Ok(Event::default().data(err_data.to_string()))).await;
+                        break;
+                    }
+                    _ => {}
                 }
             }
         });

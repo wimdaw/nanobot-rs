@@ -27,7 +27,8 @@ impl DiffReporter {
         for (i, c) in commits.iter().enumerate() {
             let short_sha = if c.sha.len() > 7 { &c.sha[..7] } else { &c.sha };
             let first_line = c.message.lines().next().unwrap_or("");
-            report.push_str(&format!(" {}. [{}] {} (by {}, {})\n", i + 1, short_sha, first_line, c.author, &c.date[..10]));
+            let date_str = if c.date.len() >= 10 { &c.date[..10] } else { &c.date };
+            report.push_str(&format!(" {}. [{}] {} (by {}, {})\n", i + 1, short_sha, first_line, c.author, date_str));
         }
 
         report.push_str("\n【已同步嵌入的静态 Prompt 模板】:\n");

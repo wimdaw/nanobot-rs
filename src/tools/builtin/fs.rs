@@ -4,13 +4,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-fn resolve_path(workspace: &str, file_path: &str) -> PathBuf {
+fn resolve_path(workspace: &str, file_path: &str) -> std::result::Result<PathBuf, String> {
     let p = Path::new(file_path);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        Path::new(workspace).join(p)
-    }
+    let policy = crate::security::SecurityPolicy::default();
+    policy.validate_path(p, workspace).map_err(|e| e.to_string())
 }
 
 pub struct ReadFileTool;
@@ -31,7 +28,10 @@ impl Tool for ReadFileTool {
     }
     async fn execute(&self, args: &Value, workspace: &str) -> Result<ToolResult> {
         let file_path = match args["file_path"].as_str() {
-            Some(p) => resolve_path(workspace, p),
+            Some(p) => match resolve_path(workspace, p) {
+                Ok(path) => path,
+                Err(e) => return Ok(ToolResult::error(e)),
+            },
             None => return Ok(ToolResult::error("缺少 file_path 参数")),
         };
         if !file_path.exists() {
@@ -75,7 +75,10 @@ impl Tool for WriteFileTool {
     }
     async fn execute(&self, args: &Value, workspace: &str) -> Result<ToolResult> {
         let file_path = match args["file_path"].as_str() {
-            Some(p) => resolve_path(workspace, p),
+            Some(p) => match resolve_path(workspace, p) {
+                Ok(path) => path,
+                Err(e) => return Ok(ToolResult::error(e)),
+            },
             None => return Ok(ToolResult::error("缺少 file_path 参数")),
         };
         let content = match args["content"].as_str() {
@@ -108,7 +111,10 @@ impl Tool for EditFileTool {
     }
     async fn execute(&self, args: &Value, workspace: &str) -> Result<ToolResult> {
         let file_path = match args["file_path"].as_str() {
-            Some(p) => resolve_path(workspace, p),
+            Some(p) => match resolve_path(workspace, p) {
+                Ok(path) => path,
+                Err(e) => return Ok(ToolResult::error(e)),
+            },
             None => return Ok(ToolResult::error("缺少 file_path 参数")),
         };
         let old_str = match args["old_string"].as_str() {

@@ -8,22 +8,20 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 pub struct MessageBus {
     inbound_tx: mpsc::Sender<InboundMessage>,
     inbound_rx: Arc<Mutex<mpsc::Receiver<InboundMessage>>>,
-    outbound_tx: mpsc::Sender<OutboundMessage>,
-    outbound_rx: Arc<Mutex<mpsc::Receiver<OutboundMessage>>>,
+    outbound_tx: broadcast::Sender<OutboundMessage>,
     event_tx: broadcast::Sender<StreamEvent>,
 }
 
 impl MessageBus {
     pub fn new(capacity: usize) -> Self {
         let (inbound_tx, inbound_rx) = mpsc::channel(capacity);
-        let (outbound_tx, outbound_rx) = mpsc::channel(capacity);
+        let (outbound_tx, _) = broadcast::channel(capacity * 2);
         let (event_tx, _) = broadcast::channel(capacity * 2);
 
         Self {
             inbound_tx,
             inbound_rx: Arc::new(Mutex::new(inbound_rx)),
             outbound_tx,
-            outbound_rx: Arc::new(Mutex::new(outbound_rx)),
             event_tx,
         }
     }
@@ -41,15 +39,12 @@ impl MessageBus {
     }
 
     pub async fn send_outbound(&self, msg: OutboundMessage) -> anyhow::Result<()> {
-        self.outbound_tx
-            .send(msg)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to send outbound: {}", e))
+        let _ = self.outbound_tx.send(msg);
+        Ok(())
     }
 
-    pub async fn recv_outbound(&self) -> Option<OutboundMessage> {
-        let mut rx = self.outbound_rx.lock().await;
-        rx.recv().await
+    pub fn subscribe_outbound(&self) -> broadcast::Receiver<OutboundMessage> {
+        self.outbound_tx.subscribe()
     }
 
     pub fn publish_event(&self, event: StreamEvent) {

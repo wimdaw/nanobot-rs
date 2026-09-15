@@ -6,6 +6,7 @@ pub mod cron;
 pub mod gateway;
 pub mod memory;
 pub mod provider;
+pub mod security;
 pub mod session;
 pub mod skills;
 pub mod sync;

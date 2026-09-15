@@ -1,4 +1,4 @@
-use super::store::JsonlStore;
+use super::store::{JsonlStore, SessionSummaryInfo};
 use super::{Session, SessionMessage};
 use anyhow::Result;
 use dashmap::DashMap;
@@ -33,11 +33,20 @@ impl SessionManager {
         self.store.load_session(session_key)
     }
 
+    /// 原子替换保存整个会话
+    pub fn save_session_atomic(&self, session_key: &str, messages: &[SessionMessage]) -> Result<()> {
+        self.store.save_session_atomic(session_key, messages)
+    }
+
     pub fn append_message(&self, session_key: &str, msg: &SessionMessage) -> Result<()> {
         self.store.append_message(session_key, msg)
     }
 
     pub fn reset_session(&self, session_key: &str) -> Result<()> {
         self.store.clear_session(session_key)
+    }
+
+    pub fn list_sessions(&self) -> Result<Vec<SessionSummaryInfo>> {
+        self.store.list_sessions()
     }
 }

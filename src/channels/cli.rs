@@ -50,7 +50,11 @@ impl CliChannel {
                         if is_error {
                             eprintln!("\x1b[31m❌ {}\x1b[0m", output);
                         } else {
-                            let preview = if output.len() > 200 { format!("{}...", &output[..200]) } else { output };
+                            let preview = if output.chars().count() > 150 {
+                                format!("{}...", output.chars().take(150).collect::<String>())
+                            } else {
+                                output
+                            };
                             eprintln!("\x1b[32m✔ {}\x1b[0m", preview.trim());
                         }
                     }
@@ -66,8 +70,9 @@ impl CliChannel {
             }
         });
 
-        // 等待最终出站回复
-        while let Some(out) = self.bus.recv_outbound().await {
+        // 等待当前会话的专属出站回复 (广播式订阅，绝不与其他通道互斥争抢)
+        let mut out_rx = self.bus.subscribe_outbound();
+        while let Ok(out) = out_rx.recv().await {
             if out.session_key == session_key {
                 return Ok(out.content);
             }

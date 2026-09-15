@@ -105,14 +105,15 @@ impl AgentLoop {
         // 智能防滚雪球：检查是否需要上下文压缩（超过 20 条自动提炼老消息，保留最新 8 条）
         SessionCompactor::maybe_compact(&mut session, 20, 8);
 
+        // 上下文治理动态窗口裁剪 (防止超长单轮请求打爆上游 TPM 限额)
+        let gov = crate::security::ContextGovernance::default();
+        session.messages = gov.govern_messages(&session.messages);
+
         // 执行多轮 Agent 状态机
         let reply_text = runner.run_turn(&mut session, &msg.content).await?;
 
-        // 持久化当前会话状态
-        sessions.reset_session(session_key)?;
-        for m in &session.messages {
-            sessions.append_message(session_key, m)?;
-        }
+        // 原子持久化当前会话状态 (防崩溃导致数据丢失)
+        sessions.save_session_atomic(session_key, &session.messages)?;
 
         // 发送出站消息到总线
         let outbound = OutboundMessage {

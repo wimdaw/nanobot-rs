@@ -10,6 +10,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
 pub struct McpClient {
+    child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<ChildStdin>>,
     stdout: Arc<Mutex<BufReader<ChildStdout>>>,
     request_id: AtomicU64,
@@ -22,6 +23,7 @@ impl McpClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            .kill_on_drop(true) // 关键：确保客户端对象析构时子进程被操作系统可靠回收
             .spawn()
             .with_context(|| format!("启动 MCP 外部进程失败: {} {:?}", command, args))?;
 
@@ -29,6 +31,7 @@ impl McpClient {
         let stdout = child.stdout.take().context("获取 MCP 进程 stdout 失败")?;
 
         let client = Self {
+            child: Arc::new(Mutex::new(child)),
             stdin: Arc::new(Mutex::new(stdin)),
             stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
             request_id: AtomicU64::new(1),
@@ -53,6 +56,12 @@ impl McpClient {
         client.notify_rpc("notifications/initialized", json!({})).await?;
 
         Ok(client)
+    }
+
+    /// 显式优雅终止 MCP 子进程
+    pub async fn shutdown(&self) {
+        let mut child = self.child.lock().await;
+        let _ = child.kill().await;
     }
 
     pub async fn call_rpc(&self, method: &str, params: Value) -> Result<Value> {

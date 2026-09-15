@@ -36,6 +36,12 @@ impl Tool for ShellTool {
             None => return Ok(ToolResult::error("缺少 command 参数")),
         };
 
+        // 安全沙箱规则校验
+        let policy = crate::security::SecurityPolicy::default();
+        if let Err(e) = policy.validate_command(cmd) {
+            return Ok(ToolResult::error(e.to_string()));
+        }
+
         let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
         let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
 
