@@ -1,3 +1,5 @@
+use super::webui;
+
 use crate::agent::AgentRunner;
 use crate::bus::MessageBus;
 use crate::config::AppConfig;
@@ -6,7 +8,7 @@ use crate::session::Session;
 use crate::tools::registry::ToolRegistry;
 use axum::extract::State;
 use axum::response::sse::{Event, Sse};
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde_json::json;
@@ -40,17 +42,23 @@ pub async fn start_http_gateway(
     let state = GatewayState { runner, config };
 
     let app = Router::new()
+        .route("/", get(dashboard_handler))
+        .route("/dashboard", get(dashboard_handler))
         .route("/health", get(health_handler))
         .route("/v1/models", get(models_handler))
         .route("/v1/chat/completions", post(chat_completions_handler))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    info!("🚀 nanobot-rs OpenAI 兼容 HTTP 网关正在监听: http://{}", addr);
+    info!("🚀 nanobot-rs WebUI 与 HTTP 网关正在监听: http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn dashboard_handler() -> impl IntoResponse {
+    Html(webui::WEBUI_HTML)
 }
 
 async fn health_handler() -> impl IntoResponse {

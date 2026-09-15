@@ -3,6 +3,7 @@ use nanobot_rs::agent::AgentLoop;
 use nanobot_rs::bus::MessageBus;
 use nanobot_rs::channels::{CliChannel, FeishuChannel};
 use nanobot_rs::config::loader::load_config;
+use nanobot_rs::cron::service::CronManager;
 use nanobot_rs::gateway::start_http_gateway;
 use nanobot_rs::memory::tools::{MemorySaveTool, MemorySearchTool};
 use nanobot_rs::memory::MemoryStore;
@@ -12,7 +13,10 @@ use nanobot_rs::provider::LlmProvider;
 use nanobot_rs::skills::tool::LoadSkillTool;
 use nanobot_rs::skills::SkillsManager;
 use nanobot_rs::sync::{AssetSyncer, DiffReporter};
+use nanobot_rs::tools::builtin::cron::{CronCreateTool, CronDeleteTool, CronListTool};
 use nanobot_rs::tools::builtin::register_all_builtin;
+use nanobot_rs::tools::builtin::sessions_tool::{SessionHistoryTool, SessionListTool};
+use nanobot_rs::tools::builtin::spawn::SpawnTool;
 use nanobot_rs::tools::registry::ToolRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -131,6 +135,29 @@ async fn main() -> anyhow::Result<()> {
     tool_registry.register(Arc::new(MemorySaveTool::new(memory_store.clone())));
     tool_registry.register(Arc::new(MemorySearchTool::new(memory_store.clone())));
     tool_registry.register(Arc::new(LoadSkillTool::new(skills_manager.clone())));
+
+    // 定时任务调度器与专属 Cron 工具
+    let cron_manager = Arc::new(CronManager::new(&config.session.storage_dir, bus.clone())?);
+    cron_manager.start_loop().await;
+    tool_registry.register(Arc::new(CronCreateTool::new(cron_manager.clone())));
+    tool_registry.register(Arc::new(CronListTool::new(cron_manager.clone())));
+    tool_registry.register(Arc::new(CronDeleteTool::new(cron_manager.clone())));
+
+    // 会话查看与跨会话工具
+    let session_mgr = Arc::new(nanobot_rs::session::manager::SessionManager::new(&config.session.storage_dir)?);
+    tool_registry.register(Arc::new(SessionListTool::new(session_mgr.clone())));
+    tool_registry.register(Arc::new(SessionHistoryTool::new(session_mgr.clone())));
+
+    // 派生子智能体工具 (SpawnTool)
+    let subagent_runner = Arc::new(nanobot_rs::agent::AgentRunner::new(
+        provider.clone(),
+        tool_registry.clone(),
+        config.model.default.clone(),
+        config.tools.workspace.clone(),
+        config.agent.max_turns,
+        bus.clone(),
+    ));
+    tool_registry.register(Arc::new(SpawnTool::new(subagent_runner)));
 
     // 6. 初始化 Agent 运行时主循环
     let agent_loop = AgentLoop::new(
